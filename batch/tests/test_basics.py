@@ -25,6 +25,7 @@ import pytest
 
 from ..create.create_with_container_no_mounting import create_container_job
 from ..create.create_with_script_no_mounting import create_script_job
+from ..create.create_with_ssd import create_local_ssd_job
 
 from ..delete.delete_job import delete_job
 from ..get.get_job import get_job
@@ -34,7 +35,7 @@ from ..list.list_tasks import list_tasks
 from ..logs.read_job_logs import print_job_logs
 
 PROJECT = google.auth.default()[1]
-REGION = "europe-north1"
+REGION = "europe-west4"
 
 TIMEOUT = 600  # 10 minutes
 
@@ -52,20 +53,25 @@ def job_name():
     return f"test-job-{uuid.uuid4().hex[:10]}"
 
 
-def _test_body(test_job: batch_v1.Job, additional_test: Callable = None):
+@pytest.fixture
+def disk_name():
+    return f"test-ssd-{uuid.uuid4().hex[:10]}"
+
+
+def _test_body(test_job: batch_v1.Job, additional_test: Callable = None, region=REGION):
     start_time = time.time()
     try:
         while test_job.status.state in WAIT_STATES:
             if time.time() - start_time > TIMEOUT:
                 pytest.fail("Timed out while waiting for job to complete!")
             test_job = get_job(
-                PROJECT, REGION, test_job.name.rsplit("/", maxsplit=1)[1]
+                PROJECT, region, test_job.name.rsplit("/", maxsplit=1)[1]
             )
             time.sleep(5)
 
         assert test_job.status.state == batch_v1.JobStatus.State.SUCCEEDED
 
-        for job in list_jobs(PROJECT, REGION):
+        for job in list_jobs(PROJECT, region):
             if test_job.uid == job.uid:
                 break
         else:
@@ -74,9 +80,9 @@ def _test_body(test_job: batch_v1.Job, additional_test: Callable = None):
         if additional_test:
             additional_test()
     finally:
-        delete_job(PROJECT, REGION, test_job.name.rsplit("/", maxsplit=1)[1]).result()
+        delete_job(PROJECT, region, test_job.name.rsplit("/", maxsplit=1)[1]).result()
 
-    for job in list_jobs(PROJECT, REGION):
+    for job in list_jobs(PROJECT, region):
         if job.uid == test_job.uid:
             pytest.fail("The test job should be deleted at this point!")
 
@@ -110,3 +116,9 @@ def test_script_job(job_name, capsys):
 def test_container_job(job_name):
     job = create_container_job(PROJECT, REGION, job_name)
     _test_body(job, additional_test=lambda: _check_tasks(job_name))
+
+
+@flaky(max_runs=3, min_passes=1)
+def test_ssd_job(job_name: str, disk_name: str, capsys: "pytest.CaptureFixture[str]"):
+    job = create_local_ssd_job(PROJECT, REGION, job_name, disk_name)
+    _test_body(job, additional_test=lambda: _check_logs(job, capsys))
